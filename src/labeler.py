@@ -27,6 +27,15 @@ class SizeRule:
     min_lines: int = 0
     max_lines: Optional[int] = None
 
+    def __post_init__(self) -> None:
+        """Validate that min_lines and max_lines form a sensible range."""
+        if self.min_lines < 0:
+            raise ValueError(f"min_lines must be >= 0, got {self.min_lines}")
+        if self.max_lines is not None and self.max_lines < self.min_lines:
+            raise ValueError(
+                f"max_lines ({self.max_lines}) must be >= min_lines ({self.min_lines})"
+            )
+
     def matches(self, total_lines: int) -> bool:
         """Return True if *total_lines* falls within [min_lines, max_lines]."""
         if total_lines < self.min_lines:
