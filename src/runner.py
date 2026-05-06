@@ -1,13 +1,17 @@
-"""Entry-point logic: wire config, GitHub client and labeler together."""
-
+"""Orchestrate label evaluation and apply changes via the GitHub API."""
 from __future__ import annotations
 
-import os
+import logging
 from typing import List
 
-from .config import load_config
-from .github_client import GitHubClient, PullRequestFile, client_from_env
-from .labeler import Labeler
+from src.config import load_config
+from src.config_validator import validate_config
+from src.github_client import GitHubClient, PullRequestFile
+from src.labeler import LabelRule, SizeRule
+from src.metrics import RunMetrics, format_summary
+from src.metrics_reporter import MetricsReporter
+
+logger = logging.getLogger(__name__)
 
 
 def _total_changes(files: List[PullRequestFile]) -> int:
@@ -15,46 +19,71 @@ def _total_changes(files: List[PullRequestFile]) -> int:
 
 
 def run(
+    *,
     config_path: str,
+    token: str,
+    repo: str,
     pr_number: int,
-    client: GitHubClient | None = None,
-) -> List[str]:
-    """Compute and apply labels for *pr_number*.
+    reporter: MetricsReporter | None = None,
+) -> None:
+    """Load config, evaluate rules, and update PR labels."""
+    metrics = RunMetrics(pr_number=pr_number)
 
-    Returns the list of labels that were applied.
-    """
-    if client is None:
-        client = client_from_env()
+    raw = load_config(config_path)
+    validate_config(raw)
 
-    config = load_config(config_path)
-    labeler = Labeler(
-        path_rules=config["path_rules"],
-        size_rules=config["size_rules"],
+    client = GitHubClient(token=token, repo=repo)
+    files = client.get_pr_files(pr_number)
+    current_labels = client.get_pr_labels(pr_number)
+
+    metrics.files_evaluated = len(files)
+    metrics.total_changes = _total_changes(files)
+
+    path_rules: List[LabelRule] = raw.get("path_rules", [])
+    size_rules: List[SizeRule] = raw.get("size_rules", [])
+
+    desired: set[str] = set()
+    file_paths = [f.filename for f in files]
+
+    for rule in path_rules:
+        if rule.matches(file_paths):
+            desired.add(rule.label)
+
+    for rule in size_rules:
+        if rule.matches(metrics.total_changes):
+            desired.add(rule.label)
+
+    current: set[str] = set(current_labels)
+    to_add = sorted(desired - current)
+    to_remove = sorted(current - desired)
+
+    for label in to_add:
+        client.add_label(pr_number, label)
+    for label in to_remove:
+        client.remove_label(pr_number, label)
+
+    metrics.labels_added = to_add
+    metrics.labels_removed = to_remove
+    metrics.finish()
+
+    logger.info(format_summary(metrics))
+
+    if reporter is not None:
+        reporter.record(metrics)
+
+
+def main() -> None:
+    import os
+
+    logging.basicConfig(level=logging.INFO)
+    run(
+        config_path=os.environ["PRCHECK_CONFIG"],
+        token=os.environ["GITHUB_TOKEN"],
+        repo=os.environ["GITHUB_REPOSITORY"],
+        pr_number=int(os.environ["PR_NUMBER"]),
+        reporter=MetricsReporter(),
     )
 
-    pr_files = client.get_pr_files(pr_number)
-    changed_paths = [f.filename for f in pr_files]
-    diff_size = _total_changes(pr_files)
 
-    labels = labeler.compute_labels(changed_paths, diff_size)
-
-    if labels:
-        client.set_labels(pr_number, labels)
-        print(f"Applied labels {labels} to PR #{pr_number}")
-    else:
-        print(f"No labels matched for PR #{pr_number}")
-
-    return labels
-
-
-def main() -> None:  # pragma: no cover
-    """CLI entry-point used by the GitHub Action step."""
-    config_path = os.environ.get("INPUT_CONFIG", ".github/prcheck.yml")
-    pr_number_raw = os.environ.get("INPUT_PR_NUMBER") or os.environ.get("PR_NUMBER")
-    if not pr_number_raw:
-        raise SystemExit("PR number not provided (INPUT_PR_NUMBER or PR_NUMBER).")
-    run(config_path=config_path, pr_number=int(pr_number_raw))
-
-
-if __name__ == "__main__":  # pragma: no cover
+if __name__ == "__main__":
     main()
