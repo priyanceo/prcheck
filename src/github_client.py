@@ -1,14 +1,25 @@
-"""Thin GitHub REST client used by the runner."""
+"""Thin GitHub REST API client used by the runner."""
 
 from __future__ import annotations
 
 import os
+import logging
 from dataclasses import dataclass
 from typing import List
 
 import requests
 
-from src.cache import ResponseCache
+from src.retry import RetryConfig, with_retry
+
+logger = logging.getLogger(__name__)
+
+_RETRY_CFG = RetryConfig(
+    max_attempts=3,
+    base_delay=1.0,
+    backoff_factor=2.0,
+    max_delay=15.0,
+    retryable_exceptions=(requests.exceptions.ConnectionError, requests.exceptions.Timeout),
+)
 
 
 @dataclass
@@ -23,17 +34,10 @@ class PullRequestFile:
 
 
 class GitHubClient:
-    """Minimal client for the GitHub Pull Requests API."""
-
     BASE_URL = "https://api.github.com"
 
-    def __init__(
-        self,
-        token: str | None = None,
-        cache: ResponseCache | None = None,
-    ) -> None:
+    def __init__(self, token: str | None = None) -> None:
         self._token = token or os.environ.get("GITHUB_TOKEN", "")
-        self._cache = cache or ResponseCache()
         self._session = requests.Session()
         self._session.headers.update(
             {
@@ -43,31 +47,30 @@ class GitHubClient:
             }
         )
 
-    def get_pr_files(self, repo: str, pr_number: int) -> List[PullRequestFile]:
-        """Return files changed in *pr_number* for *repo* (owner/name)."""
-        cache_key = f"{repo}/pulls/{pr_number}/files"
-        cached = self._cache.get(cache_key)
-        if cached is not None:
-            return [PullRequestFile(**f) for f in cached]
+    def get_pr_files(self, owner: str, repo: str, pr_number: int) -> List[PullRequestFile]:
+        url = f"{self.BASE_URL}/repos/{owner}/{repo}/pulls/{pr_number}/files"
+        logger.debug("Fetching PR files from %s", url)
 
-        url = f"{self.BASE_URL}/repos/{repo}/pulls/{pr_number}/files"
-        response = self._session.get(url, timeout=15)
-        response.raise_for_status()
-        raw: list = response.json()
+        def _fetch() -> List[PullRequestFile]:
+            resp = self._session.get(url, timeout=10)
+            resp.raise_for_status()
+            return [
+                PullRequestFile(
+                    filename=f["filename"],
+                    additions=f["additions"],
+                    deletions=f["deletions"],
+                )
+                for f in resp.json()
+            ]
 
-        files = [
-            PullRequestFile(
-                filename=item["filename"],
-                additions=item["additions"],
-                deletions=item["deletions"],
-            )
-            for item in raw
-        ]
-        self._cache.set(cache_key, [{"filename": f.filename, "additions": f.additions, "deletions": f.deletions} for f in files])
-        return files
+        return with_retry(_fetch, _RETRY_CFG)
 
-    def set_labels(self, repo: str, pr_number: int, labels: List[str]) -> None:
-        """Replace the labels on *pr_number* with *labels*."""
-        url = f"{self.BASE_URL}/repos/{repo}/issues/{pr_number}/labels"
-        response = self._session.put(url, json={"labels": labels}, timeout=15)
-        response.raise_for_status()
+    def set_pr_labels(self, owner: str, repo: str, pr_number: int, labels: List[str]) -> None:
+        url = f"{self.BASE_URL}/repos/{owner}/{repo}/issues/{pr_number}/labels"
+        logger.debug("Setting labels %s on PR #%d", labels, pr_number)
+
+        def _post() -> None:
+            resp = self._session.post(url, json={"labels": labels}, timeout=10)
+            resp.raise_for_status()
+
+        with_retry(_post, _RETRY_CFG)
