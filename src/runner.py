@@ -1,16 +1,14 @@
-"""Orchestrates PR label evaluation and applies labels via the GitHub API."""
-
+"""Orchestrates label evaluation and application (or dry-run simulation)."""
 from __future__ import annotations
 
 import os
 from typing import List
 
-from src.audit_log import AuditEntry, AuditLog
-from src.config import load_config
-from src.config_validator import validate_config
 from src.github_client import GitHubClient, PullRequestFile
 from src.labeler import LabelRule, SizeRule
-from src.metrics import RunMetrics
+from src.pr_summary import PRSummary
+from src.dry_run import DryRunReport
+from src.dry_run_formatter import write_dry_run_summary
 
 
 def _total_changes(files: List[PullRequestFile]) -> int:
@@ -18,81 +16,69 @@ def _total_changes(files: List[PullRequestFile]) -> int:
 
 
 def run(
-    *,
-    token: str,
+    client: GitHubClient,
     repo: str,
     pr_number: int,
-    config_path: str,
-    audit_log: AuditLog | None = None,
-) -> RunMetrics:
-    metrics = RunMetrics(pr_number=pr_number, repo=repo)
-
-    raw = load_config(config_path)
-    validate_config(raw)
-
-    path_rules: List[LabelRule] = [
-        LabelRule(label=r["label"], patterns=r["patterns"])
-        for r in raw.get("path_rules", [])
-    ]
-    size_rules: List[SizeRule] = [
-        SizeRule(label=r["label"], min_changes=r.get("min", 0), max_changes=r.get("max"))
-        for r in raw.get("size_rules", [])
-    ]
-
-    client = GitHubClient(token=token, repo=repo)
-    files = client.get_pr_files(pr_number)
-    total = _total_changes(files)
+    label_rules: List[LabelRule],
+    size_rules: List[SizeRule],
+    dry_run: bool = False,
+) -> PRSummary:
+    files = client.get_pr_files(repo, pr_number)
     changed_paths = [f.filename for f in files]
+    total = _total_changes(files)
 
-    desired: set[str] = set()
-    for rule in path_rules:
+    summary = PRSummary(pr_number=pr_number, repo=repo)
+    dry_report = DryRunReport(pr_number=pr_number, repo=repo) if dry_run else None
+
+    labels_to_add: list[str] = []
+
+    for rule in label_rules:
         if rule.matches(changed_paths):
-            desired.add(rule.label)
+            labels_to_add.append(rule.label)
+            summary.add_matched_rule(str(rule))
+
     for rule in size_rules:
         if rule.matches(total):
-            desired.add(rule.label)
+            labels_to_add.append(rule.label)
+            summary.add_matched_rule(str(rule))
 
-    current = set(client.get_pr_labels(pr_number))
-    to_add = sorted(desired - current)
-    to_remove = sorted(current - desired)
+    existing = set(client.get_pr_labels(repo, pr_number))
 
-    for label in to_add:
-        client.add_label(pr_number, label)
-    for label in to_remove:
-        client.remove_label(pr_number, label)
+    for label in labels_to_add:
+        if label in existing:
+            summary.skip_label(label)
+            if dry_report:
+                dry_report.record("skip", label, "already applied")
+        else:
+            summary.add_label(label)
+            if dry_report:
+                dry_report.record("add", label, "rule matched")
+            elif not dry_run:
+                client.add_label(repo, pr_number, label)
 
-    if audit_log is not None:
-        audit_log.record(
-            AuditEntry(
-                pr_number=pr_number,
-                repo=repo,
-                labels_added=to_add,
-                labels_removed=to_remove,
-                triggered_by=os.environ.get("GITHUB_ACTOR"),
-            )
-        )
+    if dry_report:
+        write_dry_run_summary(dry_report)
+        print(dry_report.format_summary())
 
-    metrics.finish(labels_added=to_add, labels_removed=to_remove, files_changed=len(files))
-    return metrics
+    return summary
 
 
 def main() -> None:  # pragma: no cover
     token = os.environ["GITHUB_TOKEN"]
     repo = os.environ["GITHUB_REPOSITORY"]
     pr_number = int(os.environ["PR_NUMBER"])
-    config_path = os.environ.get("CONFIG_PATH", ".github/prcheck.yml")
-    log_path = os.environ.get("AUDIT_LOG_PATH", "logs/audit.log")
+    dry_run = os.environ.get("DRY_RUN", "false").lower() == "true"
 
-    audit_log = AuditLog(log_path)
-    metrics = run(
-        token=token,
+    from src.config import load_config
+    from src.github_client import GitHubClient
+
+    cfg = load_config(os.environ.get("CONFIG_PATH", ".github/prcheck.yml"))
+    client = GitHubClient(token=token)
+    run(
+        client=client,
         repo=repo,
         pr_number=pr_number,
-        config_path=config_path,
-        audit_log=audit_log,
+        label_rules=cfg.get("label_rules", []),
+        size_rules=cfg.get("size_rules", []),
+        dry_run=dry_run,
     )
-    print(metrics.format_summary())
-
-
-if __name__ == "__main__":
-    main()
