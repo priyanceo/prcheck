@@ -34,11 +34,20 @@ def write_conflict_summary(
     result: ConflictResult,
     summary_path: str,
 ) -> None:
-    """Append the conflict resolution Markdown to a step summary file."""
+    """Append the conflict resolution Markdown to a step summary file.
+
+    Raises:
+        OSError: If the file at ``summary_path`` cannot be opened or written.
+    """
     content = render_conflict_markdown(pr_number, result)
-    with open(summary_path, "a", encoding="utf-8") as fh:
-        fh.write(content)
-        fh.write("\n")
+    try:
+        with open(summary_path, "a", encoding="utf-8") as fh:
+            fh.write(content)
+            fh.write("\n")
+    except OSError as exc:
+        raise OSError(
+            f"Failed to write conflict summary to '{summary_path}': {exc}"
+        ) from exc
 
 
 def log_conflicts(pr_number: int, result: ConflictResult) -> List[str]:
