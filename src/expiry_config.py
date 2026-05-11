@@ -15,6 +15,25 @@ class LabelExpiryConfig:
         """Return TTL seconds for *label*, or None if no expiry is configured."""
         return self.ttl_by_label.get(label)
 
+    def labels(self) -> List[str]:
+        """Return all labels that have an expiry configured."""
+        return list(self.ttl_by_label.keys())
+
+
+def _parse_ttl(entry: Dict[str, Any]) -> float:
+    """Extract a TTL in seconds from a single label entry dict.
+
+    Recognised keys (in priority order): ``ttl_seconds``, ``ttl_hours``,
+    ``ttl_days``.  Returns ``0.0`` when none of the keys are present.
+    """
+    if "ttl_seconds" in entry:
+        return float(entry["ttl_seconds"])
+    if "ttl_hours" in entry:
+        return float(entry["ttl_hours"]) * 3600
+    if "ttl_days" in entry:
+        return float(entry["ttl_days"]) * 86400
+    return 0.0
+
 
 def parse_expiry_config(config: Dict[str, Any]) -> LabelExpiryConfig:
     """Build a :class:`LabelExpiryConfig` from the top-level config mapping.
@@ -43,13 +62,7 @@ def parse_expiry_config(config: Dict[str, Any]) -> LabelExpiryConfig:
         label = entry.get("label", "")
         if not isinstance(label, str) or not label.strip():
             continue
-        ttl: float = 0.0
-        if "ttl_seconds" in entry:
-            ttl = float(entry["ttl_seconds"])
-        elif "ttl_hours" in entry:
-            ttl = float(entry["ttl_hours"]) * 3600
-        elif "ttl_days" in entry:
-            ttl = float(entry["ttl_days"]) * 86400
+        ttl = _parse_ttl(entry)
         if ttl > 0:
             ttl_by_label[label.strip()] = ttl
 
