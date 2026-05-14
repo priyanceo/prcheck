@@ -60,3 +60,10 @@ class TestParsePriorityConfigValues:
         resolver = parse_priority_config(config)
         result = resolver.resolve(["a", "b", "c"])
         assert len(result.ordered) == 2
+
+    def test_max_labels_zero_drops_all(self):
+        config = {"label_priority": {"max_labels": 0, "rules": []}}
+        resolver = parse_priority_config(config)
+        result = resolver.resolve(["a", "b", "c"])
+        assert result.ordered == []
+        assert len(result.dropped) == 3
