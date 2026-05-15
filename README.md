@@ -57,6 +57,18 @@ Labels are applied automatically when a PR is opened or updated based on the cha
 | `config` | Path to config file | `.github/prcheck.yml` |
 | `diff_threshold` | Max lines before `large-pr` label | `500` |
 
+## Label Rules
+
+Each label entry in the config supports the following fields:
+
+| Field | Description |
+|---|---|
+| `name` | The label name to apply (must already exist in the repository) |
+| `paths` | List of glob patterns matched against changed file paths |
+| `diff_threshold` | Apply the label when the total diff line count exceeds this number |
+
+A label is applied if **any** of its `paths` patterns match a changed file, or if the diff size exceeds `diff_threshold`. Both fields are optional, but at least one must be provided.
+
 ## License
 
 MIT © [your-org](https://github.com/your-org)
