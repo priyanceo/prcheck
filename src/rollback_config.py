@@ -11,6 +11,16 @@ class RollbackConfig:
     dry_run: bool = False
     max_labels_per_run: int = 20
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise TypeError(f"enabled must be bool, got {type(self.enabled).__name__}")
+        if not isinstance(self.dry_run, bool):
+            raise TypeError(f"dry_run must be bool, got {type(self.dry_run).__name__}")
+        if not isinstance(self.max_labels_per_run, int) or self.max_labels_per_run < 1:
+            raise ValueError(
+                f"max_labels_per_run must be a positive int, got {self.max_labels_per_run!r}"
+            )
+
 
 def parse_rollback_config(config: Dict[str, Any]) -> RollbackConfig:
     """Return a RollbackConfig from the top-level config dict.
